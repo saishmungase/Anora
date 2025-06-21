@@ -13,6 +13,15 @@ type Tone = "calm" | "excited" | "sad" | "neutral"
 interface ReflectionResponse {
   response: string
   tone: Tone
+  userId: string
+}
+
+interface HistoryItem {
+  id: string
+  userInput: string
+  detectedTone: string
+  aiResponse: string
+  timestamp: string
 }
 
 const toneConfig = {
@@ -36,6 +45,19 @@ const toneConfig = {
     orbColor: "from-gray-400 to-indigo-400",
     particles: "bg-gray-400/20",
   },
+}
+
+// User ID management utilities
+const USER_ID_KEY = 'voice_reflection_user_id'
+
+const getUserId = (): string | null => {
+  if (typeof window === 'undefined') return null
+  return localStorage.getItem(USER_ID_KEY)
+}
+
+const setUserId = (userId: string): void => {
+  if (typeof window === 'undefined') return
+  localStorage.setItem(USER_ID_KEY, userId)
 }
 
 // Particle component to prevent hydration issues
@@ -100,14 +122,37 @@ function VoiceReflectionApp() {
   const [aiResponse, setAiResponse] = useState("")
   const [isClient, setIsClient] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [userId, setUserIdState] = useState<string | null>(null)
+  const [userHistory, setUserHistory] = useState<HistoryItem[]>([])
 
   const { isListening, isRecording, startListening, stopListening, transcript: liveTranscript } = useSpeechInput()
   const { speak, isSpeaking } = useSpeechOutput()
 
-  // Handle client-side mounting
+  // Handle client-side mounting and user ID
   useEffect(() => {
     setIsClient(true)
+    
+    // Get existing user ID from localStorage
+    const existingUserId = getUserId()
+    if (existingUserId) {
+      setUserIdState(existingUserId)
+      // Optionally fetch user history
+      fetchUserHistory(existingUserId)
+    }
   }, [])
+
+  // Fetch user history
+  const fetchUserHistory = async (uid: string) => {
+    try {
+      const response = await fetch(`/api/reflect?userId=${uid}`)
+      if (response.ok) {
+        const data = await response.json()
+        setUserHistory(data.history || [])
+      }
+    } catch (error) {
+      console.error('Error fetching history:', error)
+    }
+  }
 
   // Auto-start listening when component mounts
   useEffect(() => {
@@ -154,7 +199,10 @@ function VoiceReflectionApp() {
         headers: {
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ 
+          text,
+          userId: userId || undefined // Send existing userId or undefined to create new
+        }),
       })
 
       if (!response.ok) {
@@ -163,12 +211,28 @@ function VoiceReflectionApp() {
 
       const data: ReflectionResponse = await response.json()
 
-      if (!data.response || !data.tone) {
+      if (!data.response || !data.tone || !data.userId) {
         throw new Error("Invalid response from server")
+      }
+
+      // Update user ID if it's new or different
+      if (!userId || userId !== data.userId) {
+        setUserIdState(data.userId)
+        setUserId(data.userId) // Save to localStorage
       }
 
       setCurrentTone(data.tone)
       setAiResponse(data.response)
+
+      // Update local history
+      const newHistoryItem: HistoryItem = {
+        id: Date.now().toString(), // Temporary ID
+        userInput: text,
+        detectedTone: data.tone,
+        aiResponse: data.response,
+        timestamp: new Date().toISOString()
+      }
+      setUserHistory(prev => [newHistoryItem, ...prev.slice(0, 9)]) // Keep last 10
 
       // Speak the response
       try {
@@ -278,6 +342,13 @@ function VoiceReflectionApp() {
         {/* Status Indicators */}
         <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2">
           <div className="flex items-center space-x-4">
+            {userId && (
+              <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="flex items-center space-x-2">
+                <div className="w-2 h-2 bg-purple-400 rounded-full" />
+                <span className="text-white/30 text-xs">User: {userId.slice(-6)}</span>
+              </motion.div>
+            )}
+
             {isListening && (
               <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} className="flex items-center space-x-2">
                 <div className="w-2 h-2 bg-green-400 rounded-full animate-pulse" />
@@ -307,6 +378,19 @@ function VoiceReflectionApp() {
             )}
           </div>
         </div>
+
+        {/* History indicator (optional) */}
+        {userHistory.length > 0 && (
+          <div className="absolute top-8 right-8">
+            <motion.div 
+              initial={{ opacity: 0 }} 
+              animate={{ opacity: 1 }} 
+              className="text-white/30 text-sm"
+            >
+              {userHistory.length} conversations
+            </motion.div>
+          </div>
+        )}
       </div>
     </div>
   )
