@@ -27,7 +27,6 @@ export default function AudioVisualizer({ isActive, tone }: AudioVisualizerProps
     }
 
     const interval = setInterval(() => {
-      // Generate random heights for visualization bars
       const newBars = Array.from({ length: 12 }, () => Math.random() * 100 + 20)
       setBars(newBars)
     }, 100)
