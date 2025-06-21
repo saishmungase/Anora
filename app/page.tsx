@@ -7,6 +7,7 @@ import VoiceOrb from "@/components/voice-orb"
 import AudioVisualizer from "@/components/audio-visualizer"
 import { useSpeechInput } from "@/utils/speech-input"
 import { useSpeechOutput } from "@/utils/speech-output"
+import { useRouter } from "next/navigation"
 
 type Tone = "calm" | "excited" | "sad" | "neutral"
 
@@ -150,6 +151,7 @@ function VoiceReflectionApp() {
 
   const { isListening, isRecording, startListening, stopListening, transcript: liveTranscript } = useSpeechInput()
   const { speak, isSpeaking, stopSpeaking } = useSpeechOutput()
+  const router = useRouter()
 
   useEffect(() => {
     setIsClient(true)
@@ -207,98 +209,103 @@ function VoiceReflectionApp() {
   }, [isRecording, transcript, lastProcessedTranscript])
 
   const processReflection = useCallback(async (text: string) => {
-    if (isProcessing || !text.trim()) return
+  if (isProcessing || !text.trim()) return
 
-    setIsProcessing(true)
-    setError(null)
-    setLastProcessedTranscript(text)
+  if (text.toLowerCase().includes("open mood tracker") || text.toLowerCase().includes("mood tracker")) {
+    router.push('/moodtracker')
+    return
+  }
+
+  setIsProcessing(true)
+  setError(null)
+  setLastProcessedTranscript(text)
+
+  try {
+    const requestBody = { 
+      text: text.trim(),
+      userId: userId || undefined
+    }
+
+    console.log('Sending reflection request:', requestBody)
+
+    const response = await fetch("/api/reflect", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(requestBody),
+    })
+
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}))
+      throw new Error(`Server error: ${response.status} - ${errorData.error || 'Unknown error'}`)
+    }
+
+    const data: ReflectionResponse = await response.json()
+    console.log('Received reflection response:', data)
+
+    if (!data.response || !data.tone || !data.userId) {
+      throw new Error("Invalid response from server")
+    }
+
+    if (!userId || userId !== data.userId) {
+      setUserIdState(data.userId)
+      setUserId(data.userId)
+    }
+
+    setCurrentTone(data.tone)
+    setAiResponse(data.response)
+
+    const newHistoryItem: HistoryItem = {
+      id: Date.now().toString(),
+      userInput: text,
+      detectedTone: data.tone,
+      aiResponse: data.response,
+      createdAt: new Date().toISOString()
+    }
+    setUserHistory(prev => [newHistoryItem, ...prev.slice(0, 9)])
 
     try {
-      const requestBody = { 
-        text: text.trim(),
-        userId: userId || undefined
-      }
-
-      console.log('Sending reflection request:', requestBody)
-
-      const response = await fetch("/api/reflect", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(requestBody),
-      })
-
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({}))
-        throw new Error(`Server error: ${response.status} - ${errorData.error || 'Unknown error'}`)
-      }
-
-      const data: ReflectionResponse = await response.json()
-      console.log('Received reflection response:', data)
-
-      if (!data.response || !data.tone || !data.userId) {
-        throw new Error("Invalid response from server")
-      }
-
-      if (!userId || userId !== data.userId) {
-        setUserIdState(data.userId)
-        setUserId(data.userId)
-      }
-
-      setCurrentTone(data.tone)
-      setAiResponse(data.response)
-
-      const newHistoryItem: HistoryItem = {
-        id: Date.now().toString(),
-        userInput: text,
-        detectedTone: data.tone,
-        aiResponse: data.response,
-        createdAt: new Date().toISOString()
-      }
-      setUserHistory(prev => [newHistoryItem, ...prev.slice(0, 9)])
-
-      try {
-        await stopSpeaking()
-        await speak(data.response)
-      } catch (speechError) {
-        console.warn("Speech synthesis failed:", speechError)
-      }
-
-      setTimeout(() => {
-        setTranscript("")
-        setShowTranscript(false)
-        if (isClient && !isListening) {
-          startListening()
-        }
-      }, 2000)
-
-    } catch (error) {
-      console.error("Error processing reflection:", error)
-      const errorMessage = error instanceof Error ? error.message : "Unknown error occurred"
-      setError(`I'm having trouble processing your reflection: ${errorMessage}`)
-      
-      const fallbackResponse = "I'm here to listen. Please continue sharing your thoughts."
-      setAiResponse(fallbackResponse)
-      
-      try {
-        await speak(fallbackResponse)
-      } catch (speechError) {
-        console.warn("Speech synthesis failed:", speechError)
-      }
-      
-      setTimeout(() => {
-        setTranscript("")
-        setError(null)
-        setShowTranscript(false)
-        if (isClient && !isListening) {
-          startListening()
-        }
-      }, 3000)
-    } finally {
-      setIsProcessing(false)
+      await stopSpeaking()
+      await speak(data.response)
+    } catch (speechError) {
+      console.warn("Speech synthesis failed:", speechError)
     }
-  }, [userId, isProcessing, isClient, isListening, speak, stopSpeaking, startListening])
+
+    setTimeout(() => {
+      setTranscript("")
+      setShowTranscript(false)
+      if (isClient && !isListening) {
+        startListening()
+      }
+    }, 2000)
+
+  } catch (error) {
+    console.error("Error processing reflection:", error)
+    const errorMessage = error instanceof Error ? error.message : "Unknown error occurred"
+    setError(`I'm having trouble processing your reflection: ${errorMessage}`)
+    
+    const fallbackResponse = "I'm here to listen. Please continue sharing your thoughts."
+    setAiResponse(fallbackResponse)
+    
+    try {
+      await speak(fallbackResponse)
+    } catch (speechError) {
+      console.warn("Speech synthesis failed:", speechError)
+    }
+    
+    setTimeout(() => {
+      setTranscript("")
+      setError(null)
+      setShowTranscript(false)
+      if (isClient && !isListening) {
+        startListening()
+      }
+    }, 3000)
+  } finally {
+    setIsProcessing(false)
+  }
+}, [userId, isProcessing, isClient, isListening, speak, stopSpeaking, startListening, router])
 
   const config = toneConfig[currentTone]
 

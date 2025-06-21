@@ -86,7 +86,6 @@ export default function MoodTracker() {
     }
   }, [])
 
-  // Check for navigation commands
   const checkNavigationCommands = useCallback(
     (text: string) => {
       const lowerText = text.toLowerCase().trim()
