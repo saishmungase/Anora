@@ -1,59 +1,98 @@
+import { PrismaClient } from "@/lib/generated/prisma"
+import { GoogleGenerativeAI } from "@google/generative-ai";
 import { type NextRequest, NextResponse } from "next/server"
+
+const prisma = new PrismaClient()
 
 interface ReflectionRequest {
   text: string
+  userId?: string
 }
 
 interface ReflectionResponse {
   response: string
-  tone: "calm" | "excited" | "sad" | "neutral"
+  tone: "calm" | "excited" | "sad" | "neutral" | "angry" | "anxious" | "hopeful"
+  userId: string
 }
 
-// Simple emotion detection based on keywords
-function detectTone(text: string): "calm" | "excited" | "sad" | "neutral" {
-  const lowerText = text.toLowerCase()
+async function detectToneFromAI(text: string): Promise<"calm" | "excited" | "sad" | "neutral"  | "angry" | "anxious" | "hopeful"> {
+  const AIKEY = process.env.AIKEY || process.env.GEMINI_API_KEY;
+  if (!AIKEY) {
+    console.warn("Gemini API key missing; defaulting tone to 'neutral'");
+    return "neutral";
+  }
 
-  const sadKeywords = [
-    "sad",
-    "depressed",
-    "down",
-    "upset",
-    "hurt",
-    "pain",
-    "lonely",
-    "lost",
-    "hopeless",
-    "tired",
-    "exhausted",
-    "overwhelmed",
-  ]
-  const excitedKeywords = [
-    "excited",
-    "happy",
-    "amazing",
-    "great",
-    "awesome",
-    "fantastic",
-    "wonderful",
-    "thrilled",
-    "energetic",
-    "motivated",
-  ]
-  const calmKeywords = ["peaceful", "calm", "relaxed", "content", "grateful", "mindful", "centered", "balanced"]
+  try {    
+    const genAI = new GoogleGenerativeAI(AIKEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
 
-  const sadScore = sadKeywords.filter((word) => lowerText.includes(word)).length
-  const excitedScore = excitedKeywords.filter((word) => lowerText.includes(word)).length
-  const calmScore = calmKeywords.filter((word) => lowerText.includes(word)).length
+    const prompt = `Analyze the emotional tone of the following user message. Respond with one word only: "calm", "excited", "sad", "angry", "anxious", "hopeful" or "neutral".
 
-  if (sadScore > excitedScore && sadScore > calmScore) return "sad"
-  if (excitedScore > sadScore && excitedScore > calmScore) return "excited"
-  if (calmScore > 0) return "calm"
+User: "${text}"
 
-  return "neutral"
+Tone:`;
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    const tone = response.text().trim().toLowerCase();
+
+    const validTones = ["calm", "excited", "sad", "neutral", "angry",  "anxious", "hopeful"];
+    if (validTones.includes(tone)) {
+      return tone as "calm" | "excited" | "sad" | "neutral"  | "angry" | "anxious" | "hopeful";
+    }
+
+    console.warn("Unrecognized tone from Gemini, defaulting to 'neutral':", tone);
+    return "neutral";
+  } catch (error) {
+    console.error("Gemini tone detection failed:", error);
+    return "neutral";
+  }
 }
 
-// Generate empathetic responses based on tone
-function generateResponse(text: string, tone: string): string {
+async function generateAIResponse(text: string, tone: string, userHistory?: any[]): Promise<string> {
+  const AIKEY = process.env.AIKEY || process.env.GEMINI_API_KEY;
+
+  if (!AIKEY) {
+    console.warn("AI API key not found, using fallback responses");
+    return generateFallbackResponse(text, tone);
+  }
+
+  try {
+    const contextHistory = userHistory?.slice(-3).map(h =>
+      `User: ${h.userInput}\nAI: ${h.aiResponse}`
+    ).join('\n') || '';
+
+    const systemContext = `You are an empathetic AI therapist providing compassionate voice-based reflections. 
+    Respond in a warm, supportive manner that matches the detected emotional tone: ${tone}.
+    Keep responses concise (1-2 sentences) and conversational for voice output.
+    Focus on validation, empathy, and gentle guidance.
+    ${contextHistory ? 'Consider the conversation history to provide continuity.' : ''}`;
+
+    const userPrompt = `${contextHistory ? `Previous conversation:\n${contextHistory}\n\n` : ''}Current user input: "${text}". 
+    Their emotional tone appears to be: ${tone}.
+    Provide a supportive, empathetic response that acknowledges their feelings.
+
+    System context: ${systemContext}`;
+
+    const genAI = new GoogleGenerativeAI(AIKEY);
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+
+    const result = await model.generateContent(userPrompt);
+    const response = await result.response;
+    const aiResponse = response.text();
+
+    if (!aiResponse || aiResponse.trim().length === 0) {
+      throw new Error("Empty response from Gemini API");
+    }
+
+    return aiResponse.trim();
+  } catch (error) {
+    console.error("AI API error:", error);
+    return generateFallbackResponse(text, tone);
+  }
+}
+
+function generateFallbackResponse(text: string, tone: string): string {
   const responses = {
     calm: [
       "That sounds like a peaceful moment. Take a deep breath and let that feeling settle in.",
@@ -79,31 +118,115 @@ function generateResponse(text: string, tone: string): string {
       "I'm here to hold space for whatever you're experiencing right now.",
       "Your voice and your thoughts are important. Keep sharing what's on your mind.",
     ],
-  }
+  };
 
-  const toneResponses = responses[tone as keyof typeof responses] || responses.neutral
-  return toneResponses[Math.floor(Math.random() * toneResponses.length)]
+  const toneResponses = responses[tone as keyof typeof responses] || responses.neutral;
+  return toneResponses[Math.floor(Math.random() * toneResponses.length)];
+}
+
+async function getOrCreateUser(userId?: string): Promise<string> {
+  try {
+    if (userId) {
+      const existingUser = await prisma.user.findUnique({ where: { id: userId } });
+      if (existingUser) return existingUser.id;
+    }
+
+    const newUser = await prisma.user.create({ data: {} });
+    return newUser.id;
+  } catch (error) {
+    console.error('Database error creating/finding user:', error);
+    throw new Error('Failed to manage user');
+  }
+}
+
+async function getUserHistory(userId: string): Promise<any[]> {
+  try {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      include: {
+        histories: {
+          orderBy: { createdAt: 'desc' },
+          take: 10
+        }
+      }
+    });
+    return user?.histories || [];
+  } catch (error) {
+    console.error('Database error fetching history:', error);
+    return [];
+  }
+}
+
+async function saveReflectionToHistory(userId: string, text: string, tone: string, response: string) {
+  try {
+    await prisma.history.create({
+      data: {
+        userId,
+        userInput: text,
+        detectedTone: tone,
+        aiResponse: response,
+      },
+    });
+    console.log('Successfully saved reflection to history');
+  } catch (error) {
+    console.error('Database error saving history:', error);
+  }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const body: ReflectionRequest = await request.json()
+    const body: ReflectionRequest = await request.json();
 
     if (!body.text || body.text.trim().length === 0) {
-      return NextResponse.json({ error: "Text is required" }, { status: 400 })
+      return NextResponse.json({ error: "Text is required" }, { status: 400 });
     }
 
-    const tone = detectTone(body.text)
-    const response = generateResponse(body.text, tone)
+    const userId = await getOrCreateUser(body.userId);
+    
+    const userHistory = await getUserHistory(userId);
+    
+    const [tone, response] = await Promise.all([
+      detectToneFromAI(body.text),
+      (async () => {
+        const history = await getUserHistory(userId);
+        return generateAIResponse(body.text, await detectToneFromAI(body.text), history);
+      })()
+    ]);
+
+    saveReflectionToHistory(userId, body.text, tone, response);
 
     const result: ReflectionResponse = {
       response,
       tone,
+      userId,
+    };
+
+    return NextResponse.json(result);
+  } catch (error) {
+    console.error("Error processing reflection:", error);
+    return NextResponse.json({ 
+      error: "Internal server error",
+      details: error instanceof Error ? error.message : "Unknown error"
+    }, { status: 500 });
+  }
+}
+
+export async function GET(request: NextRequest) {
+  try {
+    const { searchParams } = new URL(request.url);
+    const userId = searchParams.get('userId');
+
+    if (!userId) {
+      return NextResponse.json({ error: "User ID is required" }, { status: 400 });
     }
 
-    return NextResponse.json(result)
+    const history = await getUserHistory(userId);
+    return NextResponse.json({ history });
   } catch (error) {
-    console.error("Error processing reflection:", error)
-    return NextResponse.json({ error: "Internal server error" }, { status: 500 })
+    console.error("Error fetching history:", error);
+    return NextResponse.json({ 
+      error: "Internal server error",
+      details: error instanceof Error ? error.message : "Unknown error"
+    }, { status: 500 });
   }
 }
